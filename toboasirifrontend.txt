@@ -1,0 +1,130 @@
+// backend/server.js
+import express from 'express';
+import mongoose from 'mongoose';
+import cors from 'cors';
+import dotenv from 'dotenv';
+import admin from 'firebase-admin';
+
+dotenv.config();
+const app = express();
+const PORT = process.env.PORT || 5000;
+
+// Middleware
+app.use(express.json());
+app.use(cors());
+
+// Initialize Firebase Admin SDK
+admin.initializeApp({
+  credential: admin.credential.cert(JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT)),
+});
+
+// MongoDB Connection
+mongoose.connect(process.env.MONGO_URI, {
+  useNewUrlParser: true,
+  useUnifiedTopology: true,
+})
+.then(() => console.log('MongoDB Connected'))
+.catch(err => console.log(err));
+
+// Models
+const UserSchema = new mongoose.Schema({
+  name: String,
+  email: { type: String, unique: true },
+  uid: { type: String, unique: true },
+  provider: { type: String, default: 'email' }, // Social login provider
+});
+const StorySchema = new mongoose.Schema({
+  title: String,
+  author: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
+  anonymous: { type: Boolean, default: false },
+  createdAt: { type: Date, default: Date.now },
+  likes: { type: Number, default: 0 },
+  comments: [{
+    user: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+    text: String,
+    createdAt: { type: Date, default: Date.now },
+  }],
+  shares: { type: Number, default: 0 },
+  media: { type: String, default: '' }, // Image or short video URL
+});
+
+const User = mongoose.model('User', UserSchema);
+const Story = mongoose.model('Story', StorySchema);
+
+// Middleware to verify Firebase token
+const verifyToken = async (req, res, next) => {
+  const token = req.headers.authorization;
+  if (!token) return res.status(401).json({ error: 'Unauthorized' });
+
+  try {
+    const decodedToken = await admin.auth().verifyIdToken(token);
+    req.user = decodedToken;
+    next();
+  } catch (error) {
+    res.status(403).json({ error: 'Invalid token' });
+  }
+};
+
+// Register or login user with social authentication
+app.post('/api/auth', async (req, res) => {
+  const { name, email, uid, provider } = req.body;
+  try {
+    let user = await User.findOne({ uid });
+    if (!user) {
+      user = new User({ name, email, uid, provider });
+      await user.save();
+    }
+    res.status(200).json({ message: 'User authenticated successfully', user });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Submit story (protected route, allows anonymous posts with media content)
+app.post('/api/story', verifyToken, async (req, res) => {
+  const { title, anonymous, media } = req.body;
+  try {
+    let author = null;
+    if (!anonymous) {
+      const user = await User.findOne({ uid: req.user.uid });
+      if (!user) return res.status(404).json({ error: 'User not found' });
+      author = user._id;
+    }
+    
+    const story = new Story({ title, author, anonymous, media });
+    await story.save();
+    res.status(201).json({ message: 'Story submitted successfully' });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Fetch stories with author name, likes, comments, shares, and media content
+app.get('/api/stories', async (req, res) => {
+  try {
+    const stories = await Story.find().populate('author', 'name').populate('comments.user', 'name');
+    const formattedStories = stories.map(story => ({
+      title: story.title,
+      author: story.anonymous ? 'Anonymous' : story.author?.name || 'Unknown',
+      createdAt: story.createdAt,
+      likes: story.likes,
+      shares: story.shares,
+      media: story.media,
+      comments: story.comments.map(comment => ({
+        user: comment.user?.name || 'Unknown',
+        text: comment.text,
+        createdAt: comment.createdAt,
+      })),
+    }));
+    res.json(formattedStories);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Sample Route
+app.get('/', (req, res) => {
+  res.send('Toboa Siri254 API is running...');
+});
+
+app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
