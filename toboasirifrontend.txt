@@ -32,6 +32,7 @@ const UserSchema = new mongoose.Schema({
   email: { type: String, unique: true },
   uid: { type: String, unique: true },
   provider: { type: String, default: 'email' }, // Social login provider
+  badges: { type: [String], default: [] }, // User badges for gamification
 });
 const StorySchema = new mongoose.Schema({
   title: String,
@@ -46,10 +47,24 @@ const StorySchema = new mongoose.Schema({
   }],
   shares: { type: Number, default: 0 },
   media: { type: String, default: '' }, // Image or short video URL
+  reactions: { type: Map, of: Number, default: {} }, // Emojis reactions
+});
+
+const GroupSchema = new mongoose.Schema({
+  name: { type: String, required: true },
+  description: { type: String },
+  createdAt: { type: Date, default: Date.now },
+  members: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
+  posts: [{
+    author: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+    content: String,
+    createdAt: { type: Date, default: Date.now },
+  }]
 });
 
 const User = mongoose.model('User', UserSchema);
 const Story = mongoose.model('Story', StorySchema);
+const Group = mongoose.model('Group', GroupSchema);
 
 // Middleware to verify Firebase token
 const verifyToken = async (req, res, next) => {
@@ -65,58 +80,41 @@ const verifyToken = async (req, res, next) => {
   }
 };
 
-// Register or login user with social authentication
-app.post('/api/auth', async (req, res) => {
-  const { name, email, uid, provider } = req.body;
+// Create a Group
+app.post('/api/groups', verifyToken, async (req, res) => {
   try {
-    let user = await User.findOne({ uid });
-    if (!user) {
-      user = new User({ name, email, uid, provider });
-      await user.save();
-    }
-    res.status(200).json({ message: 'User authenticated successfully', user });
+    const group = new Group({
+      name: req.body.name,
+      description: req.body.description,
+      members: [req.user.uid],
+    });
+    await group.save();
+    res.status(201).json(group);
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
 });
 
-// Submit story (protected route, allows anonymous posts with media content)
-app.post('/api/story', verifyToken, async (req, res) => {
-  const { title, anonymous, media } = req.body;
+// Join a Group
+app.post('/api/groups/:groupId/join', verifyToken, async (req, res) => {
   try {
-    let author = null;
-    if (!anonymous) {
-      const user = await User.findOne({ uid: req.user.uid });
-      if (!user) return res.status(404).json({ error: 'User not found' });
-      author = user._id;
+    const group = await Group.findById(req.params.groupId);
+    if (!group) return res.status(404).json({ error: 'Group not found' });
+    if (!group.members.includes(req.user.uid)) {
+      group.members.push(req.user.uid);
+      await group.save();
     }
-    
-    const story = new Story({ title, author, anonymous, media });
-    await story.save();
-    res.status(201).json({ message: 'Story submitted successfully' });
+    res.status(200).json({ message: 'Joined group successfully', group });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
 });
 
-// Fetch stories with author name, likes, comments, shares, and media content
-app.get('/api/stories', async (req, res) => {
+// Fetch All Groups
+app.get('/api/groups', async (req, res) => {
   try {
-    const stories = await Story.find().populate('author', 'name').populate('comments.user', 'name');
-    const formattedStories = stories.map(story => ({
-      title: story.title,
-      author: story.anonymous ? 'Anonymous' : story.author?.name || 'Unknown',
-      createdAt: story.createdAt,
-      likes: story.likes,
-      shares: story.shares,
-      media: story.media,
-      comments: story.comments.map(comment => ({
-        user: comment.user?.name || 'Unknown',
-        text: comment.text,
-        createdAt: comment.createdAt,
-      })),
-    }));
-    res.json(formattedStories);
+    const groups = await Group.find();
+    res.json(groups);
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
